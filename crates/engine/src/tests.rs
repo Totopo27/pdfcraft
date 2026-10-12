@@ -914,11 +914,32 @@ fn autosave_snapshots_only_changed_documents() {
     assert_eq!(snaps.len(), 1);
     assert_eq!(snaps[0].bytes, s.get(id).unwrap().bytes, "the working file");
     assert!(s.autosave_snapshots().is_empty(), "nothing new since the last snapshot");
+    s.apply(id, Edit::RotatePages { pages: vec![1], degrees: 90 }).unwrap();
+    assert_eq!(s.autosave_snapshots().len(), 1);
     s.undo(id).unwrap();
-    assert_eq!(s.autosave_snapshots().len(), 1, "undo is a change too");
+    assert_eq!(s.autosave_snapshots().len(), 1, "undo is a change too when edits remain");
     let saved = s.save_bytes(id).unwrap();
     s.mark_saved(id, saved, None).unwrap();
     assert!(s.autosave_snapshots().is_empty(), "saved documents need no recovery");
+}
+
+#[test]
+fn undo_restores_saved_state() {
+    let mut session = Session::new().with_clock(|| 1_700_000_000);
+    let opened = Arc::new(fixture(2));
+    let id = session.open("existing.pdf", None, opened.clone(), None).unwrap();
+    assert!(!session.get(id).unwrap().dirty);
+    assert!(session.autosave_snapshots().is_empty());
+
+    session.apply(id, Edit::DeletePages { pages: vec![0] }).unwrap();
+    assert_eq!(session.get(id).unwrap().info.pages.len(), 1);
+    session.undo(id).unwrap();
+    let document = session.get(id).unwrap();
+    assert_eq!(document.info.pages.len(), 2);
+    let matches_opened = document.bytes == opened;
+    let dirty = document.dirty;
+    let snapshots = session.autosave_snapshots();
+    assert_eq!((matches_opened, dirty, snapshots.len()), (true, false, 0));
 }
 
 #[test]

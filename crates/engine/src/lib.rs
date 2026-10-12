@@ -253,6 +253,9 @@ struct Editor {
     appearances: AppearanceCache,
     /// The text blocks last computed for one page, reused while the document is unchanged.
     text_blocks: TextBlocksCache,
+    /// Identity of the clean, saved document source. If an undo/redo restores the document to this
+    /// exact unmodified state, `doc.dirty` is cleared.
+    clean_source: Option<pdfcraft_cos::SourceIdentity>,
 }
 
 /// One page's text blocks ([`pdfcraft_edit::text_blocks`]) and the unmodified document state they
@@ -3068,6 +3071,7 @@ impl Session {
         let config = RenderConfig { password: render_password.as_deref().map(Arc::from), ..Default::default() };
         let (mut editor, read_only_reason) = match cos {
             Ok(Ok(cos)) => {
+                let clean_source = (!cos.is_modified()).then(|| cos.source_identity());
                 let keys = Keys { render: render_password.clone(), reopen: password.map(str::to_owned) };
                 (
                     Some(Editor {
@@ -3077,6 +3081,7 @@ impl Session {
                         keys,
                         appearances: AppearanceCache::default(),
                         text_blocks: TextBlocksCache::default(),
+                        clean_source,
                     }),
                     None,
                 )
@@ -3342,7 +3347,10 @@ impl Session {
         editor.redo.push((label.clone(), current, current_keys, scope));
         Self::adopt_keys(doc);
         Self::refresh_scoped(doc, scope).inspect_err(|_| Self::show_released(doc))?;
-        doc.dirty = true;
+        let is_clean = doc.editor.as_ref().is_some_and(|e| {
+            !e.cos.is_modified() && e.clean_source.as_ref().is_some_and(|clean| *clean == e.cos.source_identity())
+        });
+        doc.dirty = !is_clean;
         doc.generation += 1;
         Ok(label)
     }
@@ -3357,7 +3365,10 @@ impl Session {
         editor.undo.push((label.clone(), current, current_keys, scope));
         Self::adopt_keys(doc);
         Self::refresh_scoped(doc, scope).inspect_err(|_| Self::show_released(doc))?;
-        doc.dirty = true;
+        let is_clean = doc.editor.as_ref().is_some_and(|e| {
+            !e.cos.is_modified() && e.clean_source.as_ref().is_some_and(|clean| *clean == e.cos.source_identity())
+        });
+        doc.dirty = !is_clean;
         doc.generation += 1;
         Ok(label)
     }
@@ -3614,6 +3625,9 @@ impl Session {
             doc.name = std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone());
             doc.path = Some(p);
         }
+        if let Some(editor) = doc.editor.as_mut() {
+            editor.clean_source = Some(editor.cos.source_identity());
+        }
         doc.dirty = false;
         doc.generation += 1;
         Self::refresh(doc).inspect_err(|_| Self::show_released(doc))
@@ -3671,6 +3685,7 @@ impl Session {
         editor.keys = keys;
         editor.undo.clear();
         editor.redo.clear();
+        editor.clean_source = Some(editor.cos.source_identity());
         Self::adopt_keys(doc);
         doc.dirty = false;
         doc.generation += 1;
@@ -4101,6 +4116,9 @@ impl Session {
     pub fn open_new(&mut self, name: impl Into<String>, bytes: Arc<Vec<u8>>) -> Result<DocId, OpenError> {
         let id = self.open(name, None, bytes, None)?;
         if let Some(d) = self.docs.iter_mut().find(|d| d.id == id) {
+            if let Some(e) = d.editor.as_mut() {
+                e.clean_source = None;
+            }
             d.dirty = true;
             // Unsaved work with no edit yet still needs its first recovery snapshot.
             d.generation += 1;
